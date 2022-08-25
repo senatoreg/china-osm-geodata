@@ -26,7 +26,11 @@ countryconvertion = {
 
 def main(argv):
     parser = argparse.ArgumentParser(
-        description="Tools to aggregate final_df.csv data by recipient country."
+        description = """
+        Tools to aggregate final_df.csv data by recipient country.
+
+        input file example: output_data/2.0release/results/2021_09_29_12_06/final_df.csv
+        """
     )
     parser.add_argument("input", type=str, nargs=1, help="input file")
     parser.add_argument("--output", dest="output", action="store",
@@ -43,7 +47,17 @@ def main(argv):
     with open(isoa3db, 'r') as isoa3file:
         isoa3 = json.load(isoa3file)
 
-    datain = {}
+    dataout = {"locale": "en-US",
+               "format": {
+                   "style": "currency",
+                   "currency": "USD",
+                   "notation": "compact",
+                   "minimumFractionDigits": 0,
+                   "maximumFractionDigits": 2
+               },
+               "data": {}
+               }
+    datain = dataout["data"]
 
     with open(input_, 'r') as csvfile:
         reader = csv.DictReader(csvfile)
@@ -74,9 +88,9 @@ def main(argv):
 
     if output_:
         with open(output_, 'w') as out:
-            json.dump(datain, out)
+            json.dump(dataout, out)
     else:
-        print(json.dumps(datain))
+        print(json.dumps(dataout))
 
 
 if __name__ == "__main__":
