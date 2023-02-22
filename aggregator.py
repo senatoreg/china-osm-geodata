@@ -249,10 +249,10 @@ def main(argv):
     parser.add_argument("input", type=str, help="input file")
     parser.add_argument("--geojson-path", "-g", dest="geojson", action="store",
                         default=GEOJSON_PATH,
-                        required=False, type=str, help="output filename")
+                        required=False, type=str, help="geojson source files path")
     parser.add_argument("--metric", "-m", dest="metric", action="store",
                         default="Implementation Start Year",
-                        required=False, type=str, help="output filename")
+                        required=False, type=str, help="Metric to index aggregated data")
     parser.add_argument("--output", "-o", dest="output", action="store",
                         required=False, type=str, help="output filename")
     parser.add_argument("--iso-3166", "-i", dest="isoa3db", action="store",
@@ -260,8 +260,8 @@ def main(argv):
     parser.add_argument("--loglevel", "-l", dest="loglevel", action="store",
                         default="info", type=str,
                         choices=loglevel_defs.keys(), help="log level")
-    parser.add_argument("--quiet", "-q", dest="quiet", action="store_true",
-                        help="quiet execution")
+    #parser.add_argument("--quiet", "-q", dest="quiet", action="store_true",
+    #                    help="quiet execution")
 
     args = parser.parse_args(argv)
 
