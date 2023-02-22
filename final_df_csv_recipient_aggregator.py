@@ -18,7 +18,9 @@ import geopandas as gpd
 import pathlib
 import logging
 import locale
+import unicodedata
 from io import StringIO
+from tqdm import tqdm
 
 
 locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
@@ -75,7 +77,8 @@ datetime_columns = [
 
 
 def to_country(x):
-        return countryconvertion[x] if x in countryconvertion else x
+    if isinstance(x, str):
+        return countryconvertion[x] if x in countryconvertion else unicodedata.normalize('NFD', x).encode("ascii", "ignore").decode()
 
 
 def to_year(x):
@@ -113,7 +116,8 @@ countryconvertion = {
     "Bolivia": "Bolivia (Plurinational State of)",
     "Democratic Republic of the Congo": "Congo, Democratic Republic of the",
     "Venezuela": "Venezuela (Bolivarian Republic of)",
-    "Cote d'Ivoire": "Côte d'Ivoire",
+    #"Cote d'Ivoire": "Côte d'Ivoire",
+    "Curaçao": "Curacao",
     "Moldova": "Moldova, Republic of",
     "Kyrgyz Republic": "Kyrgyzstan",
     "Tanzania": "Tanzania, United Republic of",
@@ -127,8 +131,13 @@ class CountryCode():
     def __init__(self, filename):
         with open(filename, 'r') as f:
             self._data = json.load(f)
+        for c in self._data:
+            c["name"] = unicodedata.normalize('NFD', c["name"]).encode("ascii", "ignore").decode()
+            #print(c["name"])
 
     def lookup(self, x):
+        if pd.isna(x):
+            return np.nan
         for c in self._data:
             if c["alpha-3"] == x:
                 return c["name"]
@@ -136,18 +145,24 @@ class CountryCode():
         return np.nan
 
     def reverse_lookup(self, x):
+        if pd.isna(x):
+            return np.nan
         for c in self._data:
-            if c["name"] == x:
+            if c["name"] == unicodedata.normalize('NFD', x).encode("ascii", "ignore").decode():
                 return c["alpha-3"]
-        #raise KeyError("{x} not found".format(x=x))
-        return np.nan
+        raise KeyError("{x} not found".format(x=x))
+        #return np.nan
 
 
-def import_geojson(path):
+def import_geojson(path, quiet=False):
     gdf = gpd.GeoDataFrame()
     files = pathlib.Path(path).glob(GEOJSON_FILE_EXTENSION)
     logger.info('Importing GeoJson file from path {p}'.format(p=path))
-    for f in sorted(files):
+    if quiet:
+        w = sorted(files)
+    else:
+        w = tqdm(sorted(files), desc="Loading GeoJSON", leave=False)
+    for f in w:
         logger.debug('Importing GeoJson file {f}'.format(f=f))
         geofile = gpd.read_file(f)
         geofile = geofile.set_index([GEOPANDAS_INDEX_COLUMN])
@@ -177,9 +192,11 @@ def parse_geojson(gdf):
     value_max = gdf[GEOPANDAS_VALUE_COLUMN].max()
     value_range = value_max - value_min
     new_gdf['value'] = gdf[GEOPANDAS_VALUE_COLUMN].map(lambda x: (x - value_min) / value_range)
-    new_gdf['group'] = gdf["AidData Sector Name"].map(lambda x: x.lower().capitalize())
-    new_gdf['country'] = gdf['Recipient']
-    new_gdf['fill'] = gdf["Status"] == "Completion"
+    new_gdf['group'] = gdf["Flow Type"].map(lambda x: x.lower().capitalize())
+    new_gdf['country'] = gdf['Recipient'].apply(to_country)
+    new_gdf['filled'] = gdf["Status"] == "Completion"
+    new_gdf['opacity'] = 0.33
+    new_gdf['indexValue'] = gdf["Commitment Year"].apply(lambda x: str(x))
 
     return new_gdf
 
@@ -191,7 +208,7 @@ def main(argv):
         input file example: output_data/2.0release/results/2021_09_29_12_06/final_df.csv
         """
     )
-    parser.add_argument("input", type=str, nargs=1, help="input file")
+    parser.add_argument("input", type=str, nargs='?', help="input file")
     parser.add_argument("--source-path", "-s", dest="source", action="store",
                         default=GEOJSON_PATH,
                         required=False, type=str, help="output filename")
@@ -205,6 +222,8 @@ def main(argv):
     parser.add_argument("--loglevel", "-l", dest="loglevel", action="store",
                         default="info", type=str,
                         choices=loglevel_defs.keys(), help="log level")
+    parser.add_argument("--quiet", "-q", dest="quiet", action="store_true",
+                        help="quiet execution")
 
     args = parser.parse_args(argv)
 
@@ -212,13 +231,14 @@ def main(argv):
     # logging.basicConfig(level=logging.NOTSET)
     logger.setLevel(loglevel)
 
-    input_ = args.input[0]
+    input_ = args.input
     output_ = args.output
     isoa3db = args.isoa3db if args.isoa3db else 'iso_a3.json'
 
     countrycode = CountryCode(isoa3db)
 
     dataout = {
+        "type": "d3.js:geo",
         "locale": "en-US",
         "format": {
             "style": "currency",
@@ -248,11 +268,14 @@ def main(argv):
 
     new_g = df.groupby(by=["Recipient Code", "Commitment Year"])["Amount (Constant USD2017)"].sum().reset_index()
     new_g["Commitment Year"] = new_g["Commitment Year"].map(lambda x: dt.datetime.strftime(x, "%Y"))
-    new_g = new_g.pivot(index="Recipient Code", columns="Commitment Year", values="Amount (Constant USD2017)").fillna(0)
-    new_g = new_g.cumsum(axis=1)
-    dataout["index"] = new_g.columns.tolist()
-    dataout["data"] = new_g.apply(lambda x: {"label": "Amount of investments", "value": x.tolist()}, axis=1).to_dict()
+    new_g = new_g.pivot(columns="Recipient Code", index="Commitment Year", values="Amount (Constant USD2017)").fillna(0)
+    new_g = new_g.cumsum(axis=0)
+    new_g_dict = new_g.to_dict(orient='split')
+    new_g_dict["key"] = new_g_dict["columns"]
+    del new_g_dict["columns"]
+    dataout["dataset"] = new_g_dict
 
+    dataout["dataset"]["label"] = {"data": "Amount of investments"}
 
     # c_g = df.groupby(by=["Recipient Code"])
     # # dataout["data"] = c_g["Amount (Constant USD2017)"].sum().sort_values(ascending=[False]).to_dict()
@@ -260,7 +283,7 @@ def main(argv):
     # for k, v in values.items():
     #     datain[k] = {"value": v, "label": "Amount of investments"}
 
-    gdf = import_geojson(args.source)
+    gdf = import_geojson(args.source, args.quiet)
     gdf["country"] = gdf['country'].map(to_country)
     gdf["country3ISO"] = gdf['country'].map(countrycode.reverse_lookup)
     gdf["country3ISO"].astype("category")
