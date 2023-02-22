@@ -7,19 +7,15 @@ import csv
 import json
 import re
 import pandas as pd
-import numpy as np
 import datetime as dt
-import pandas as pd
-from pandas.io.formats.printing import _pprint_dict
-import shapely as shp
-import geojson
-import fiona
-import geopandas as gpd
+import shapely
+from shapely.geometry import shape
+from shapely.ops import transform
+import pyproj.transformer
 import pathlib
 import logging
 import locale
-import unicodedata
-from io import StringIO
+import unicodedata#from io import StringIO
 from tqdm import tqdm
 
 
@@ -27,8 +23,9 @@ locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
 
 logger = logging.getLogger('china-osn-data')
 
+SPHERICAL_CRS="EPSG:4326"
+PLANAR_CRS="EPSG:6893"
 GEOJSON_PATH = 'latest/geojsons'
-TEMP_PATH = '/tmp'
 GEOJSON_FILE_EXTENSION = '*.geojson'
 GEOPANDAS_INDEX_COLUMN = 'id'
 GEOPANDAS_VALUE_COLUMN = 'Amount (Constant USD2017)'
@@ -46,8 +43,8 @@ def to_loglevel(x):
     return loglevel_defs[x]
 
 headers = {
-    "id": "category",
-    "AidData TUFF Project ID": "category",
+    "id": "int",
+    "AidData TUFF Project ID": "int",
     # "Recommended For Aggregates": "bool",
     # "Umbrella": "bool",
     "Title": "str",
@@ -82,14 +79,18 @@ def to_country(x):
 
 
 def to_year(x):
-    return dt.datetime.strptime(str(int(float(x))), '%Y') if x else np.nan
+    return dt.datetime.strptime(str(int(float(x))), '%Y') if x else float('NaN')
 
 
 def to_datetime(x):
-    return dt.datetime.fromisoformat(x) if x else np.nan
+    return dt.datetime.fromisoformat(x) if x else float('NaN')
 
 def to_bool(x):
     return x == 'Yes'
+
+def to_json(o):
+    if isinstance(o, dt.datetime):
+        return dt.datetime.strftime(o, "%Y") if not pd.isnull(o) else None
 
 converters = {
     "Recipient": to_country,
@@ -105,7 +106,7 @@ converters = {
 }
 
 def date_parser(date):
-    return dt.datetime.fromisoformat(date) if date else np.nan
+    return dt.datetime.fromisoformat(date) if date else float('NaN')
 
 
 countryconvertion = {
@@ -123,8 +124,8 @@ countryconvertion = {
     "Tanzania": "Tanzania, United Republic of",
     "West Bank and Gaza Strip": "Palestine, State of",
     "Curacao": "Curaçao",
-    "Africa, regional": np.nan,
-    "Multi-Region": np.nan,
+    "Africa, regional": float('NaN'),
+    "Multi-Region": float('NaN'),
 }
 
 class CountryCode():
@@ -137,44 +138,60 @@ class CountryCode():
 
     def lookup(self, x):
         if pd.isna(x):
-            return np.nan
+            return float('NaN')
         for c in self._data:
             if c["alpha-3"] == x:
                 return c["name"]
         #raise KeyError("{x} not found".format(x=x))
-        return np.nan
+        return float('NaN')
 
     def reverse_lookup(self, x):
         if pd.isna(x):
-            return np.nan
+            return float('NaN')
         for c in self._data:
             if c["name"] == unicodedata.normalize('NFD', x).encode("ascii", "ignore").decode():
                 return c["alpha-3"]
         raise KeyError("{x} not found".format(x=x))
-        #return np.nan
+        #return float('NaN')
 
 
-def import_geojson(path, quiet=False):
-    gdf = gpd.GeoDataFrame()
+def import_geojson(path, metric):
+    tr2planar = pyproj.transformer.Transformer.from_crs(crs_from=SPHERICAL_CRS, crs_to=PLANAR_CRS, always_xy=True)
+    tr2spheric = pyproj.transformer.Transformer.from_crs(crs_from=PLANAR_CRS, crs_to=SPHERICAL_CRS, always_xy=True)
+
+    a = []
+
     files = pathlib.Path(path).glob(GEOJSON_FILE_EXTENSION)
     logger.info('Importing GeoJson file from path {p}'.format(p=path))
-    if quiet:
-        w = sorted(files)
-    else:
-        w = tqdm(sorted(files), desc="Loading GeoJSON", leave=False)
-    for f in w:
+
+    for f in tqdm(sorted(files), desc="Loading GeoJSON", leave=False):
         logger.debug('Importing GeoJson file {f}'.format(f=f))
-        geofile = gpd.read_file(f)
-        geofile = geofile.set_index([GEOPANDAS_INDEX_COLUMN])
-        gdf = gdf.append(geofile)
+        with open(f, "r") as geofile:
+            js = json.load(geofile)
+        for x in js["features"]:
+            feature = {}
+            for k, v in x["properties"].items():
+                if k in converters:
+                    feature[k] = converters[k](v)
+                else:
+                    feature[k] = v
+            center = transform(tr2planar.transform, shape(x["geometry"])).centroid
+            geom = transform(tr2spheric.transform, center)
 
-    return parse_geojson(gdf)
+            feature["geometry"] = geom
+            a.append(feature)
 
-def to_json(o):
+    gdf = pd.DataFrame.from_records(a, index="id")
+
+    return parse_geojson(gdf, metric)
+
+def default_json(o):
     if isinstance(o, dt.datetime):
-        return dt.datetime.strftime(o, "%Y") if not pd.isnull(o) else None
+        return o.isoformat()
+    else:
+        return o
 
-def parse_geojson(gdf):
+def parse_geojson(gdf, metric):
     # To calculate center of region it's needed transforming geographical spherical coordinates
     # to planar coordinates using "to_crs()" method.
     # In this case we use Mercator projection ("epsg:3857").
@@ -184,21 +201,42 @@ def parse_geojson(gdf):
     # Update to EPSG:6893 = WGS 84 / World Mercator + EGM2008 height
     # https://epsg.io/6893
 
-    new_gdf = gpd.GeoDataFrame(index=gdf.index.tolist())
-    new_gdf['geometry'] = gdf.to_crs('epsg:6893').centroid.to_crs('epsg:4326')
-    gdf.set_geometry('geometry')
-
     value_min = gdf[GEOPANDAS_VALUE_COLUMN].min()
     value_max = gdf[GEOPANDAS_VALUE_COLUMN].max()
     value_range = value_max - value_min
-    new_gdf['value'] = gdf[GEOPANDAS_VALUE_COLUMN].map(lambda x: (x - value_min) / value_range)
-    new_gdf['group'] = gdf["Flow Type"].map(lambda x: x.lower().capitalize())
-    new_gdf['country'] = gdf['Recipient'].apply(to_country)
-    new_gdf['filled'] = gdf["Status"] == "Completion"
-    new_gdf['opacity'] = 0.33
-    new_gdf['indexValue'] = gdf["Commitment Year"].apply(lambda x: str(x))
+    gdf['value'] = gdf[GEOPANDAS_VALUE_COLUMN].map(lambda x: (x - value_min) / value_range)
+    gdf['group'] = gdf["Flow Type"].map(lambda x: x.lower().capitalize())
+    gdf['country'] = gdf['Recipient'].apply(to_country)
+    gdf['filled'] = gdf["Status"] == "Completion"
+    gdf['opacity'] = 0.33
+    gdf['indexValue'] = gdf[metric].apply(lambda x: dt.datetime.strftime(x, "%Y") if not isinstance (x, type(pd.NaT)) else float('NaN'))
 
-    return new_gdf
+    return gdf
+
+
+def df_to_geojson(df):
+    # create a new python dict to contain our geojson data, using geojson format
+    geojson = {'type':'FeatureCollection', 'features':[]}
+
+    # loop through each row in the dataframe and convert each row to geojson format
+    for idx, row in df.iterrows():
+        # create a feature template to fill in
+        feature = {'type':'Feature',
+                   'properties':{}}
+
+        # fill in the coordinates
+        feature['geometry'] = shapely.geometry.mapping(row["geometry"])
+
+        # for each column, get the value and add it as a new feature property
+        for k, v in row.items():
+            if k != "geometry":
+                feature['properties'][k] = v
+
+        # add this feature (aka, converted dataframe row) to the list of features inside our dict
+        geojson['features'].append(feature)
+
+    return geojson
+
 
 def main(argv):
     parser = argparse.ArgumentParser(
@@ -208,12 +246,12 @@ def main(argv):
         input file example: output_data/2.0release/results/2021_09_29_12_06/final_df.csv
         """
     )
-    parser.add_argument("input", type=str, nargs='?', help="input file")
-    parser.add_argument("--source-path", "-s", dest="source", action="store",
+    parser.add_argument("input", type=str, help="input file")
+    parser.add_argument("--geojson-path", "-g", dest="geojson", action="store",
                         default=GEOJSON_PATH,
                         required=False, type=str, help="output filename")
-    parser.add_argument("--temp-path", "-t", dest="tmp_path", action="store",
-                        default=TEMP_PATH,
+    parser.add_argument("--metric", "-m", dest="metric", action="store",
+                        default="Implementation Start Year",
                         required=False, type=str, help="output filename")
     parser.add_argument("--output", "-o", dest="output", action="store",
                         required=False, type=str, help="output filename")
@@ -234,6 +272,9 @@ def main(argv):
     input_ = args.input
     output_ = args.output
     isoa3db = args.isoa3db if args.isoa3db else 'iso_a3.json'
+
+    #metric = "Commitment Year"
+    metric = args.metric
 
     countrycode = CountryCode(isoa3db)
 
@@ -263,61 +304,33 @@ def main(argv):
     df["Recipient Code"].astype("category")
 
     df = df[df["Recipient"].isna() == False]
-    df = df.sort_values(["Recipient Code", "Commitment Year"], ascending=[True, True])
+    df = df.sort_values(["Recipient Code", metric], ascending=[True, True])
 
-
-    new_g = df.groupby(by=["Recipient Code", "Commitment Year"])["Amount (Constant USD2017)"].sum().reset_index()
-    new_g["Commitment Year"] = new_g["Commitment Year"].map(lambda x: dt.datetime.strftime(x, "%Y"))
-    new_g = new_g.pivot(columns="Recipient Code", index="Commitment Year", values="Amount (Constant USD2017)").fillna(0)
+    new_g = df.groupby(by=["Recipient Code", metric])["Amount (Constant USD2017)"].sum().reset_index()
+    new_g[metric] = new_g[metric].map(lambda x: dt.datetime.strftime(x, "%Y"))
+    new_g = new_g.pivot(columns="Recipient Code", index=metric, values="Amount (Constant USD2017)").fillna(0)
     new_g = new_g.cumsum(axis=0)
     new_g_dict = new_g.to_dict(orient='split')
     new_g_dict["key"] = new_g_dict["columns"]
     del new_g_dict["columns"]
     dataout["dataset"] = new_g_dict
 
-    dataout["dataset"]["label"] = {"data": "Amount of investments"}
+    dataout["dataset"]["label"] = {"data": "Amount of investments (USD2017)"}
 
-    # c_g = df.groupby(by=["Recipient Code"])
-    # # dataout["data"] = c_g["Amount (Constant USD2017)"].sum().sort_values(ascending=[False]).to_dict()
-    # values = c_g["Amount (Constant USD2017)"].sum().sort_values(ascending=[False]).to_dict()
-    # for k, v in values.items():
-    #     datain[k] = {"value": v, "label": "Amount of investments"}
-
-    gdf = import_geojson(args.source, args.quiet)
+    gdf = import_geojson(args.geojson, metric)
     gdf["country"] = gdf['country'].map(to_country)
     gdf["country3ISO"] = gdf['country'].map(countrycode.reverse_lookup)
     gdf["country3ISO"].astype("category")
+    gdf = gdf.loc[gdf[metric].notnull()]
+    gdf = gdf.replace([float('NaN')], [None])
 
-    # save data in temporary directory
-    tmp_file = args.tmp_path + '/' + 'china-osm-data' + str(os.getpid()) + '.geojson'
-    gdf.to_file(tmp_file, driver='GeoJSON')
-    with open(tmp_file, "r") as f:
-        geojson_data = json.load(f)
-
-    if loglevel >= logging.DEBUG and os.path.exists(tmp_file):
-        os.remove(tmp_file)
-    dataout["geojson"] = geojson_data
-
-    # y_g = df.groupby(["Completion Year"])
-    #
-    # new_d = {}
-    # for k, v in y_g["Amount (Constant USD2017)"].sum().to_dict().items():
-    #     new_d[k.strftime('%Y')] = {"amount": v, "projects": None}
-    # for k, v in y_g["id"].count().to_dict().items():
-    #     year = k.strftime('%Y')
-    #     if year in new_d:
-    #         new_d[year]["projects"] = v
-    #     else:
-    #         new_d[year] = {"amount": None, "projects": v}
-    #
-    #
-    # print(json.dumps(new_d))
+    dataout["geojson"] = df_to_geojson(gdf)
 
     if output_:
         with open(output_, 'w') as out:
-            json.dump(dataout, out)
+            json.dump(dataout, out, default=default_json)
     else:
-        print(json.dumps(dataout))
+        print(json.dumps(dataout, default=default_json))
 
 
 if __name__ == "__main__":
