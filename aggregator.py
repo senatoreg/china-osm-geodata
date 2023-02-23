@@ -251,7 +251,7 @@ def main(argv):
                         default=GEOJSON_PATH,
                         required=False, type=str, help="geojson source files path")
     parser.add_argument("--metric", "-m", dest="metric", action="store",
-                        default="Implementation Start Year",
+                        default="Commitment Start",
                         required=False, type=str, help="Metric to index aggregated data")
     parser.add_argument("--output", "-o", dest="output", action="store",
                         required=False, type=str, help="output filename")
@@ -315,7 +315,7 @@ def main(argv):
     del new_g_dict["columns"]
     dataout["dataset"] = new_g_dict
 
-    dataout["dataset"]["label"] = {"data": "Amount of investments (USD2017)"}
+    dataout["dataset"]["label"] = {"data": "Amount of investments (Constant 2017)"}
 
     gdf = import_geojson(args.geojson, metric)
     gdf["country"] = gdf['country'].map(to_country)
